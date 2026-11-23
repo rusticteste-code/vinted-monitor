@@ -17,6 +17,10 @@ CONFIG_FILE = "config.json"
 MAX_SEEN = 2000      # IDs kept per search
 MAX_SEND = 10        # max alerts per search per run (rest marked seen)
 FAIL_WARN_AT = 3     # consecutive failed runs before one Telegram warning
+# Vinted item IDs grow ~10M/day (~7k/min). The "newest" page also mixes in older
+# (bumped) listings, so only alert on IDs at most this far below the newest ID seen
+# before (~45 min of listings).
+MAX_ID_LAG = 300_000
 
 
 class FetchError(Exception):
@@ -154,19 +158,28 @@ def run():
             continue
 
         ids = [str(x["id"]) for x in items]
+        max_ids = state.setdefault("max_id", {})
+        fetched_max = max((int(i) for i in ids), default=0)
         if name not in seen:
             seen[name] = ids[:MAX_SEEN]
+            max_ids[name] = fetched_max
             print(f"[{name}] first run: seeded {len(ids)} IDs, no alerts")
             continue
 
+        prev_max = max_ids.get(name) or max((int(i) for i in seen[name]), default=0)
         known = set(seen[name])
         new = [x for x in items if str(x["id"]) not in known]
-        to_send = [x for x in new if price_ok(x, search.get("price_to"))][:MAX_SEND]
-        print(f"[{name}] {len(items)} fetched, {len(new)} new, {len(to_send)} alerts")
-        for item in reversed(to_send):  # oldest first, newest ends up at the bottom
+        fresh = [x for x in new if int(x["id"]) > prev_max - MAX_ID_LAG]
+        to_send = [x for x in fresh if price_ok(x, search.get("price_to"))]
+        to_send.sort(key=lambda x: int(x["id"]))  # oldest first, newest at the bottom
+        to_send = to_send[-MAX_SEND:]
+        print(f"[{name}] {len(items)} fetched, {len(new)} unseen, "
+              f"{len(new) - len(fresh)} skipped as old, {len(to_send)} alerts")
+        for item in to_send:
             send_item(item, domain, name)
             time.sleep(1)
         seen[name] = ([str(x["id"]) for x in new] + seen[name])[:MAX_SEEN]
+        max_ids[name] = max(prev_max, fetched_max)
 
     streak = state.get("fail_streak", 0) + 1 if failed else 0
     state["fail_streak"] = streak
