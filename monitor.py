@@ -21,6 +21,9 @@ FAIL_WARN_AT = 3     # consecutive failed runs before one Telegram warning
 # (bumped) listings, so only alert on IDs at most this far below the newest ID seen
 # before (~45 min of listings).
 MAX_ID_LAG = 300_000
+# With "include_bumped": true, older IDs still alert if they sit in the top N results
+# (bumps land at the top; items lower down usually just slid in as others sold).
+BUMP_TOP_N = 30
 
 
 class FetchError(Exception):
@@ -102,7 +105,7 @@ def tg(method, data):
         return False
 
 
-def send_item(item, domain, search_name):
+def send_item(item, domain, search_name, bumped=False):
     p = item.get("productItem") or {}
     box = p.get("itemBox") or {}
     price = p.get("price") or {}
@@ -113,7 +116,7 @@ def send_item(item, domain, search_name):
         f"💶 {e(price.get('amount'))} {e(price.get('currencyCode'))}",
         f"📏 {e(box.get('secondLine')) or '—'}",
         f"🏷 {e(box.get('firstLine')) or '—'}",
-        f"🔎 {e(search_name)}",
+        f"🔎 {e(search_name)}" + (" · ♻️ bumped (older listing)" if bumped else ""),
         f'<a href="{html.escape(link, quote=True)}">Open on Vinted</a>',
     ]
     caption = "\n".join(lines)
@@ -169,14 +172,20 @@ def run():
         prev_max = max_ids.get(name) or max((int(i) for i in seen[name]), default=0)
         known = set(seen[name])
         new = [x for x in items if str(x["id"]) not in known]
-        fresh = [x for x in new if int(x["id"]) > prev_max - MAX_ID_LAG]
-        to_send = [x for x in fresh if price_ok(x, search.get("price_to"))]
+        pos = {x["id"]: i for i, x in enumerate(items)}
+        is_old = lambda x: int(x["id"]) <= prev_max - MAX_ID_LAG
+        allow_bumped = bool(search.get("include_bumped"))
+        wanted = [x for x in new
+                  if not is_old(x) or (allow_bumped and pos[x["id"]] < BUMP_TOP_N)]
+        to_send = [x for x in wanted if price_ok(x, search.get("price_to"))]
         to_send.sort(key=lambda x: int(x["id"]))  # oldest first, newest at the bottom
         to_send = to_send[-MAX_SEND:]
+        n_bumped = sum(1 for x in to_send if is_old(x))
         print(f"[{name}] {len(items)} fetched, {len(new)} unseen, "
-              f"{len(new) - len(fresh)} skipped as old, {len(to_send)} alerts")
+              f"{len(new) - len(wanted)} skipped as old, {len(to_send)} alerts "
+              f"({n_bumped} bumped)")
         for item in to_send:
-            send_item(item, domain, name)
+            send_item(item, domain, name, bumped=is_old(item))
             time.sleep(1)
         seen[name] = ([str(x["id"]) for x in new] + seen[name])[:MAX_SEEN]
         max_ids[name] = max(prev_max, fetched_max)
