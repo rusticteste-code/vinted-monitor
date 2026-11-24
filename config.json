@@ -2,7 +2,7 @@
   "searches": [
     {
       "name": "Balenciaga Arena",
-      "search_text": "balenciaga arena",     
+      "search_text": "balenciaga arena",
       "include_bumped": true,
       "domain": "vinted.de"
     }
